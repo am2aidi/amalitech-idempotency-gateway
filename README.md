@@ -17,62 +17,81 @@ The project also includes a built-in browser dashboard, so you can test the API 
 ## 2. Architecture Diagram
 
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {
+  'background': '#ffffff',
+  'primaryColor': '#ffffff',
+  'primaryBorderColor': '#000000',
+  'primaryTextColor': '#000000',
+  'secondaryColor': '#ffffff',
+  'secondaryBorderColor': '#000000',
+  'secondaryTextColor': '#000000',
+  'tertiaryColor': '#ffffff',
+  'tertiaryBorderColor': '#000000',
+  'tertiaryTextColor': '#000000',
+  'lineColor': '#000000',
+  'textColor': '#000000',
+  'mainBkg': '#ffffff',
+  'actorBkg': '#ffffff',
+  'actorBorder': '#000000',
+  'actorTextColor': '#000000',
+  'signalColor': '#000000',
+  'signalTextColor': '#000000',
+  'labelBoxBkgColor': '#ffffff',
+  'labelBoxBorderColor': '#000000',
+  'labelTextColor': '#000000',
+  'loopTextColor': '#000000',
+  'noteBkgColor': '#ffffff',
+  'noteBorderColor': '#000000',
+  'noteTextColor': '#000000'
+}}}%%
 sequenceDiagram
     participant Client
-    participant UI as Local Dashboard / Postman
+    participant UI as Dashboard or Postman
     participant API as Flask API
-    participant Store as Thread-Safe Idempotency Store
+    participant Store as Idempotency Store
     participant Processor as Payment Simulation
 
-    rect rgb(236, 250, 242)
-        Note over Client,Processor: Happy Path
-        Client->>UI: Submit payment
-        UI->>API: POST /process-payment + Idempotency-Key
-        API->>Store: lock + lookup key
-        Store-->>API: key not found
-        API->>Store: save status=processing
-        API->>Processor: sleep 2 seconds
-        Processor-->>API: payment completed
-        API->>Store: save completed response
-        API-->>UI: 201 + New Transaction Success
-        UI-->>Client: Green success banner
-    end
+    Note over Client,Processor: Scenario 1 - Happy Path
+    Client->>UI: Submit payment
+    UI->>API: POST /process-payment + Idempotency-Key
+    API->>Store: Lock and look up key
+    Store-->>API: Key not found
+    API->>Store: Save status = processing
+    API->>Processor: Wait 2 seconds
+    Processor-->>API: Payment completed
+    API->>Store: Save completed response
+    API-->>UI: 201 New Transaction Success
+    UI-->>Client: Show success result
 
-    rect rgb(235, 244, 255)
-        Note over Client,Processor: Replay Cache Hit
-        Client->>UI: Retry exact same request
-        UI->>API: POST /process-payment + same key/body
-        API->>Store: lock + lookup key
-        Store-->>API: completed match found
-        API-->>UI: 200 + Duplicate Detected - Already Paid
-        UI-->>Client: Blue cached-response banner
-    end
+    Note over Client,Processor: Scenario 2 - Replay Cache Hit
+    Client->>UI: Send same payment again
+    UI->>API: POST /process-payment with same key and body
+    API->>Store: Lock and look up key
+    Store-->>API: Completed match found
+    API-->>UI: 200 Duplicate Detected - Already Paid
+    UI-->>Client: Show saved result
 
-    rect rgb(255, 239, 239)
-        Note over Client,Processor: Mismatch Fraud Blocker
-        Client->>UI: Reuse same key with different amount/body
-        UI->>API: POST /process-payment + same key/new body
-        API->>Store: compare stored payload hash
-        Store-->>API: hash mismatch
-        API-->>UI: 409 + Security Alert - Conflict
-        UI-->>Client: Red conflict banner
-    end
+    Note over Client,Processor: Scenario 3 - Mismatch Fraud Blocker
+    Client->>UI: Reuse same key with different body
+    UI->>API: POST /process-payment with changed amount
+    API->>Store: Compare saved payload hash
+    Store-->>API: Hash mismatch
+    API-->>UI: 409 Security Alert - Conflict
+    UI-->>Client: Show blocked result
 
-    rect rgb(255, 248, 235)
-        Note over Client,Processor: In-Flight Race Blocking
-        Client->>UI: Send request A
-        UI->>API: POST /process-payment
-        API->>Store: create processing record
-        API->>Processor: sleep 2 seconds
-        Client->>UI: Send request B immediately
-        UI->>API: POST /process-payment with same key/body
-        API->>Store: see status=processing
-        API->>API: wait on condition
-        Processor-->>API: request A completes
-        API->>Store: notify waiting request
-        API-->>UI: 200 + Duplicate Detected - Already Paid
-        UI-->>Client: Blue cached-response banner
-    end
+    Note over Client,Processor: Scenario 4 - In-Flight Race Blocking
+    Client->>UI: Send request A
+    UI->>API: POST /process-payment
+    API->>Store: Create processing record
+    API->>Processor: Wait 2 seconds
+    Client->>UI: Send request B right away
+    UI->>API: POST /process-payment with same key and body
+    API->>Store: See status = processing
+    API->>API: Wait on condition
+    Processor-->>API: Request A completes
+    API->>Store: Notify waiting request
+    API-->>UI: 200 Duplicate Detected - Already Paid
+    UI-->>Client: Show saved result
 ```
 
 ## 3. Setup & Installation Instructions
