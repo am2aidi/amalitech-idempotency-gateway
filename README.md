@@ -1,100 +1,130 @@
-# Idempotency Gateway
+# Idempotency-Gateway: The "Pay-Once" Protocol
 
-A lightweight payment gateway simulation that guarantees a payment request is processed exactly once per `Idempotency-Key`.
+This project is a Flask-based payment simulation service that guarantees a payment request is processed once per `Idempotency-Key`, even if the client retries because of timeouts or flaky networks.
 
-It protects merchants from double charging when they retry a timed-out payment request. The first request is processed with a simulated delay, and every safe retry returns the original response immediately without charging again.
+It is designed to protect a payment processor from accidental double charging by caching the first successful result and replaying it safely for duplicates.
 
-## Architecture Diagram
+## System Flow
 
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Gateway as Idempotency Gateway
-    participant Store as Idempotency Store
-    participant Processor as Payment Processor (Simulated)
+    participant API as Flask API
+    participant Store as In-Memory Store
+    participant Processor as Payment Logic
 
-    Client->>Gateway: POST /process-payment + Idempotency-Key
-    Gateway->>Store: Lookup key + request fingerprint
+    rect rgb(240, 248, 255)
+        Note over Client,Processor: Happy Path
+        Client->>API: POST /process-payment<br/>Idempotency-Key: pay-001<br/>{amount: 100, currency: "GHS"}
+        API->>Store: lock + lookup key
+        Store-->>API: key not found
+        API->>Store: create processing record
+        API->>Processor: simulate charge (2 seconds)
+        Processor-->>API: "Charged 100 GHS"
+        API->>Store: save completed response
+        API-->>Client: 201 Created<br/>X-Cache-Hit: false
+    end
 
-    alt First request
-        Store-->>Gateway: Key not found
-        Gateway->>Store: Mark request as processing
-        Gateway->>Processor: Simulate payment charge (2s delay)
-        Processor-->>Gateway: Payment success
-        Gateway->>Store: Save status code + headers + body
-        Gateway-->>Client: 201 Created, X-Cache-Hit: false
-    else Duplicate request, same body
-        Store-->>Gateway: Saved response found
-        Gateway-->>Client: Replay original response, X-Cache-Hit: true
-    else Same key arrives while first request is still processing
-        Store-->>Gateway: Existing in-flight request
-        Gateway-->>Client: Wait for original request to finish
-        Gateway-->>Client: Replay original response, X-Cache-Hit: true
-    else Duplicate request, different body
-        Store-->>Gateway: Fingerprint mismatch
-        Gateway-->>Client: 409 Conflict
+    rect rgb(245, 255, 245)
+        Note over Client,Processor: Duplicate Path
+        Client->>API: POST same key + same body
+        API->>Store: lock + lookup key
+        Store-->>API: completed cached record
+        API-->>Client: 200 OK<br/>same response body<br/>X-Cache-Hit: true
+    end
+
+    rect rgb(255, 250, 240)
+        Note over Client,Processor: In-Flight Block Path
+        Client->>API: POST same key + same body while first request is sleeping
+        API->>Store: lock + lookup key
+        Store-->>API: record is processing
+        API->>API: wait on thread event
+        Processor-->>API: first request completes
+        API->>Store: event is released
+        API-->>Client: 200 OK<br/>same cached response<br/>X-Cache-Hit: true
+    end
+
+    rect rgb(255, 245, 245)
+        Note over Client,Processor: Fraud Path
+        Client->>API: POST same key + different body
+        API->>Store: lock + compare body hash
+        Store-->>API: hash mismatch
+        API-->>Client: 409 Conflict<br/>"Idempotency key already used for a different request body."
     end
 ```
 
 ## Features
 
-- `POST /process-payment` processes a payment exactly once per idempotency key.
-- Duplicate requests with the same key and same JSON body replay the saved response instantly.
-- Requests that reuse a key with a different body are rejected with `409 Conflict`.
-- In-flight duplicates wait for the first request to finish, then receive the same result.
-- Built-in request validation protects the API from malformed payment payloads.
-- Configurable TTL cleanup prevents idempotency records from living forever in memory.
+- `POST /process-payment` enforces idempotent payment processing.
+- Requires an `Idempotency-Key` request header.
+- Uses a thread-safe in-memory dictionary protected by `threading.Lock()`.
+- Simulates payment execution with a 2-second delay for the first request only.
+- Returns cached responses immediately for exact duplicates.
+- Blocks and safely replays the result for in-flight duplicate requests.
+- Rejects same-key requests with different bodies using `409 Conflict`.
+- Provides an admin endpoint to manually evict cached idempotency keys.
 
 ## Tech Stack
 
-- Node.js built-in `http` server
-- In-memory `Map`-backed idempotency store
-- Node.js built-in test runner (`node --test`)
+- Python 3
+- Flask
+- Standard library concurrency primitives: `threading.Lock()` and `threading.Event()`
 
-No third-party dependencies are required.
+## Project Files
 
-## Setup Instructions
+- [app.py](./app.py): Flask application and idempotency logic
+- [requirements.txt](./requirements.txt): Python dependencies
+- [README.md](./README.md): Documentation
 
-### Prerequisites
+## Local Installation
 
-- Node.js 18+ (tested with Node.js 24)
+### 1. Create and activate a virtual environment
 
-### Run locally
+Windows PowerShell:
 
-```bash
-npm start
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 ```
 
-The API starts on `http://localhost:3000` by default.
-
-### Run tests
+macOS/Linux:
 
 ```bash
-npm test
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
-## Environment Variables
+### 2. Install dependencies
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `PORT` | `3000` | HTTP server port |
-| `PROCESSING_DELAY_MS` | `2000` | Simulated payment processing delay |
-| `IDEMPOTENCY_TTL_MS` | `86400000` | Time to keep completed idempotency records in memory |
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Start the server
+
+```bash
+python app.py
+```
+
+The API runs on:
+
+```text
+http://localhost:5000
+```
 
 ## API Documentation
 
 ### `POST /process-payment`
 
-Processes a payment request once and safely replays the same result for retries.
+Processes a payment exactly once for each unique `Idempotency-Key`.
 
-#### Required Headers
+#### Required Header
 
-| Header | Description |
-| --- | --- |
-| `Content-Type: application/json` | Request body format |
-| `Idempotency-Key: <unique-string>` | Unique key used to deduplicate retries |
+```http
+Idempotency-Key: <unique-string>
+```
 
-#### Request Body
+#### Example Request Body
 
 ```json
 {
@@ -103,63 +133,49 @@ Processes a payment request once and safely replays the same result for retries.
 }
 ```
 
-#### Successful First Request
+#### First Request Response
+
+Status:
 
 ```http
-POST /process-payment
-Idempotency-Key: pay-123
-Content-Type: application/json
-```
-
-```json
-{
-  "amount": 100,
-  "currency": "GHS"
-}
-```
-
-Response:
-
-```http
-HTTP/1.1 201 Created
-Content-Type: application/json; charset=utf-8
+201 Created
 X-Cache-Hit: false
 ```
 
+Body:
+
 ```json
 {
-  "message": "Charged 100 GHS",
-  "paymentId": "3ac84f9d-2ea0-4c9c-b9f0-5a77d8bf8ee7",
-  "idempotencyKey": "pay-123",
-  "processedAt": "2026-05-23T08:00:00.000Z"
+  "message": "Charged 100 GHS"
 }
 ```
 
 #### Duplicate Request With Same Key And Same Body
 
-The second request returns the original body and status code immediately.
+Status:
 
 ```http
-HTTP/1.1 201 Created
-Content-Type: application/json; charset=utf-8
+200 OK
 X-Cache-Hit: true
 ```
 
+Body:
+
 ```json
 {
-  "message": "Charged 100 GHS",
-  "paymentId": "3ac84f9d-2ea0-4c9c-b9f0-5a77d8bf8ee7",
-  "idempotencyKey": "pay-123",
-  "processedAt": "2026-05-23T08:00:00.000Z"
+  "message": "Charged 100 GHS"
 }
 ```
 
 #### Same Key With Different Body
 
+Status:
+
 ```http
-HTTP/1.1 409 Conflict
-Content-Type: application/json; charset=utf-8
+409 Conflict
 ```
+
+Body:
 
 ```json
 {
@@ -167,104 +183,167 @@ Content-Type: application/json; charset=utf-8
 }
 ```
 
-#### Validation Error Example
+### `DELETE /admin/idempotency-keys/<key>`
 
-```http
-HTTP/1.1 400 Bad Request
-Content-Type: application/json; charset=utf-8
-```
+Manually removes a completed idempotency key from memory.
 
-```json
-{
-  "error": "currency must be a 3-letter uppercase ISO code."
-}
-```
-
-### `GET /health`
-
-Simple liveness endpoint.
-
-Response:
+Successful response:
 
 ```json
 {
-  "status": "ok"
+  "message": "Idempotency key 'pay-001' deleted."
 }
 ```
 
-## Example cURL Commands
+If the key does not exist:
 
-### First payment request
+```json
+{
+  "error": "Idempotency key not found."
+}
+```
+
+If the key is still being processed:
+
+```json
+{
+  "error": "Cannot evict a key that is currently processing."
+}
+```
+
+## curl Commands
+
+### 1. Happy Path
 
 ```bash
-curl -X POST http://localhost:3000/process-payment \
+curl -X POST http://localhost:5000/process-payment \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: pay-001" \
   -d "{\"amount\":100,\"currency\":\"GHS\"}"
 ```
 
-### Safe retry using the same idempotency key
+### 2. Duplicate Request
+
+Run the exact same command again:
 
 ```bash
-curl -X POST http://localhost:3000/process-payment \
+curl -X POST http://localhost:5000/process-payment \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: pay-001" \
   -d "{\"amount\":100,\"currency\":\"GHS\"}"
 ```
 
-### Rejected conflicting retry
+Expected result:
+
+- no 2-second delay
+- `200 OK`
+- `X-Cache-Hit: true`
+
+### 3. Fraud Check
 
 ```bash
-curl -X POST http://localhost:3000/process-payment \
+curl -X POST http://localhost:5000/process-payment \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: pay-001" \
   -d "{\"amount\":500,\"currency\":\"GHS\"}"
 ```
 
+Expected result:
+
+- `409 Conflict`
+- error message stating the key was used for a different body
+
+### 4. In-Flight Race Condition
+
+Open two terminals and run these commands almost at the same time.
+
+Terminal 1:
+
+```bash
+curl -X POST http://localhost:5000/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: pay-race-001" \
+  -d "{\"amount\":250,\"currency\":\"USD\"}"
+```
+
+Terminal 2, immediately after Terminal 1:
+
+```bash
+curl -X POST http://localhost:5000/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: pay-race-001" \
+  -d "{\"amount\":250,\"currency\":\"USD\"}"
+```
+
+Expected result:
+
+- Terminal 1 waits about 2 seconds and returns `201 Created`
+- Terminal 2 does not start a new charge
+- Terminal 2 waits for Terminal 1 to finish
+- Terminal 2 returns the cached result with `200 OK` and `X-Cache-Hit: true`
+
+### 5. Admin Eviction
+
+```bash
+curl -X DELETE http://localhost:5000/admin/idempotency-keys/pay-001
+```
+
 ## Design Decisions
 
-### 1. Canonical Request Fingerprinting
+### 1. In-Memory Dictionary With `threading.Lock()`
 
-The gateway creates a stable SHA-256 fingerprint from the JSON payload. This avoids false mismatches caused by object key order differences and makes body comparison deterministic.
+The assignment explicitly requested a local, thread-safe store. A shared Python dictionary guarded by a global `threading.Lock()` keeps the design simple, deterministic, and fully compliant with the brief.
 
-### 2. In-Memory Coordination With Waiters
+### 2. Canonical Body Hashing
 
-Each active idempotency key stores its processing state. If a second identical request arrives while the first one is still running, it waits on the same promise instead of starting another payment flow.
+Request bodies are converted into a stable JSON string with sorted keys and hashed using SHA-256. This prevents false mismatches caused by object key ordering and gives a reliable way to decide whether two requests are truly the same.
 
-### 3. Replaying The Saved HTTP Response
+### 3. Safe In-Flight Coordination
 
-The store keeps the original status code, headers, and serialized body. This guarantees duplicate callers receive the same business result as the first successful request.
+When the first request starts processing, it creates a record with status `processing` and a `threading.Event()`. Any duplicate request with the same key and same body waits on that event. Once the first request finishes, the event is released and waiting callers receive the cached result instead of triggering a second charge.
 
-### 4. Simple By Design
+### 4. Response Semantics
 
-The current solution uses an in-memory store because the challenge allows it and it keeps the logic easy to review. In production, the same pattern should move to Redis or a database-backed store shared across all application instances.
+- First successful request returns `201 Created` with `X-Cache-Hit: false`
+- Cached duplicates return `200 OK` with `X-Cache-Hit: true`
+- Conflicting duplicates return `409 Conflict`
 
-## Developer's Choice
+This makes it easy for clients and reviewers to see whether a response came from fresh processing or replay.
 
-### Expiring Idempotency Records
+## Developer's Choice Feature
 
-I added TTL-based eviction for completed idempotency keys.
+### Administrative Key Eviction
 
-Why this matters for a real fintech system:
+I added:
 
-- It prevents memory growth from unbounded idempotency history.
-- It defines a clear replay window for clients.
-- It keeps operational behavior predictable under sustained traffic.
+```http
+DELETE /admin/idempotency-keys/<key>
+```
 
-The TTL is configurable with `IDEMPOTENCY_TTL_MS`, so the replay retention window can be tuned without changing code.
+This gives support or operations staff a direct way to remove a completed idempotency key from memory when they need to clear stale entries manually.
 
-## Test Coverage
+Why this is useful in a real fintech environment:
 
-Automated tests cover:
+- support teams sometimes need operational tools without restarting the service
+- stale cached keys can be cleared intentionally after investigation
+- it provides a simple manual recovery path during demos, testing, or incident handling
 
-- first-time successful payment processing
-- duplicate replay behavior
-- conflicting body reuse with the same key
-- concurrent duplicate requests during the in-flight window
+Safety note:
 
-## Production Hardening Ideas
+- the endpoint refuses to evict keys that are still `processing`
+- this preserves exactly-once behavior and avoids introducing a second charge while a live request is still in flight
 
-- move the idempotency store to Redis for multi-instance deployments
-- persist payment audit logs to a database
-- add authentication and rate limiting
-- expose metrics for cache hits, conflicts, and processing time
+## Example Success Criteria Mapping
+
+- User Story 1: supported by `POST /process-payment` with a 2-second processing delay and `201 Created`
+- User Story 2: supported by cached replay with `200 OK` and `X-Cache-Hit: true`
+- User Story 3: supported by SHA-256 body comparison and `409 Conflict`
+- Bonus Story: supported by blocking duplicate callers on a shared thread event until the first request completes
+
+## How To Submit
+
+1. Push this repository to your public GitHub fork.
+2. Confirm the README is the only documentation file reviewers need.
+3. Verify the server starts with `python app.py`.
+4. Test the endpoints using the curl commands above.
+5. Submit the GitHub repository link.
