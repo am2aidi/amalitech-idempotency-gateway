@@ -17,33 +17,6 @@ The project also includes a built-in browser dashboard, so you can test the API 
 ## 2. Architecture Diagram
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#ffffff',
-  'primaryColor': '#ffffff',
-  'primaryBorderColor': '#000000',
-  'primaryTextColor': '#000000',
-  'secondaryColor': '#ffffff',
-  'secondaryBorderColor': '#000000',
-  'secondaryTextColor': '#000000',
-  'tertiaryColor': '#ffffff',
-  'tertiaryBorderColor': '#000000',
-  'tertiaryTextColor': '#000000',
-  'lineColor': '#000000',
-  'textColor': '#000000',
-  'mainBkg': '#ffffff',
-  'actorBkg': '#ffffff',
-  'actorBorder': '#000000',
-  'actorTextColor': '#000000',
-  'signalColor': '#000000',
-  'signalTextColor': '#000000',
-  'labelBoxBkgColor': '#ffffff',
-  'labelBoxBorderColor': '#000000',
-  'labelTextColor': '#000000',
-  'loopTextColor': '#000000',
-  'noteBkgColor': '#ffffff',
-  'noteBorderColor': '#000000',
-  'noteTextColor': '#000000'
-}}}%%
 sequenceDiagram
     participant Client
     participant UI as Dashboard or Postman
