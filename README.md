@@ -112,6 +112,25 @@ The app will be available at:
 http://localhost:5000
 ```
 
+### Quick TTL demo mode
+
+The normal cache lifetime is 24 hours. For a fast demo, you can run the app with a 1-minute TTL:
+
+Windows PowerShell:
+
+```powershell
+$env:IDEMPOTENCY_TTL_SECONDS=60
+python app.py
+```
+
+macOS / Linux:
+
+```bash
+IDEMPOTENCY_TTL_SECONDS=60 python app.py
+```
+
+In this mode, a saved key will disappear after 1 minute, so you can watch the payment become "new" again without waiting 24 hours.
+
 ### Run the unit tests
 
 ```bash
@@ -224,6 +243,8 @@ Completed idempotency keys are kept for 24 hours.
 - once the 24-hour window passes, the key is removed automatically
 - after that, the same request is treated like a brand-new payment again
 
+For quick testing, you can set `IDEMPOTENCY_TTL_SECONDS=60` before starting the app. That changes the cache life to 1 minute so the automatic cleanup is easier to see.
+
 ### Manual Testing With curl
 
 #### New transaction
@@ -254,6 +275,18 @@ curl -X POST http://localhost:5000/process-payment \
   -H "Idempotency-Key: pay-001" \
   -d "{\"amount\":500,\"currency\":\"GHS\"}"
 ```
+
+#### TTL expiry test
+
+1. Send the normal payment request once.
+2. Wait until the TTL window ends.
+3. Send the same request again.
+
+Expected result:
+
+- with the default setup, wait 24 hours
+- with `IDEMPOTENCY_TTL_SECONDS=60`, wait 1 minute
+- after the key expires, the same payment is treated as new again and returns `201 Created`
 
 #### Admin eviction
 
@@ -293,6 +326,13 @@ Each stored key gets an `expires_at` timestamp set to 24 hours from the moment i
 
 The root route serves a local HTML dashboard so the project can be shown and tested without building a separate frontend. It uses `fetch()` to call the same API routes used by Postman.
 
+The dashboard also explains the 4 main cases in plain English:
+
+- a new payment
+- a duplicate payment
+- a blocked conflict
+- an expired key that becomes usable again
+
 ## 6. The Developer's Choice
 
 This project now includes two extra safety features beyond the main idempotency flow.
@@ -329,4 +369,6 @@ Every saved idempotency key gets a 24-hour time-to-live window. When that time p
 - the local service stays easier to manage over time
 - the replay window is clear and predictable
 - once a key expires, the same payment can be handled as a fresh transaction again
+
+For demos and local testing, the TTL can also be shortened to 60 seconds with `IDEMPOTENCY_TTL_SECONDS=60`.
 ```

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -16,7 +17,8 @@ STATUS_NEW_SUCCESS = "New Transaction Success"
 STATUS_DUPLICATE = "Duplicate Detected - Already Paid"
 STATUS_CONFLICT = "Security Alert - Conflict"
 STATUS_ADMIN = "Admin Success"
-IDEMPOTENCY_TTL_HOURS = 24
+DEFAULT_TTL_SECONDS = 24 * 60 * 60
+IDEMPOTENCY_TTL_SECONDS = int(os.getenv("IDEMPOTENCY_TTL_SECONDS", DEFAULT_TTL_SECONDS))
 
 DASHBOARD_TEMPLATE = """
 <!doctype html>
@@ -179,6 +181,29 @@ DASHBOARD_TEMPLATE = """
             gap: 14px;
         }
 
+        .scenario-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 14px;
+        }
+
+        .scenario-card {
+            border-radius: 18px;
+            padding: 16px 18px;
+            border: 1px solid rgba(27, 36, 48, 0.1);
+        }
+
+        .scenario-card h3 {
+            margin: 0 0 8px;
+            font-size: 1rem;
+        }
+
+        .scenario-card p {
+            margin: 0;
+            line-height: 1.55;
+            color: inherit;
+        }
+
         .banner {
             display: none;
             border-radius: 18px;
@@ -226,6 +251,12 @@ DASHBOARD_TEMPLATE = """
             border-color: rgba(161, 47, 52, 0.18);
         }
 
+        .neutral {
+            background: #fff4d9;
+            color: #7c4a00;
+            border-color: rgba(124, 74, 0, 0.18);
+        }
+
         .meta {
             display: grid;
             gap: 12px;
@@ -267,6 +298,10 @@ DASHBOARD_TEMPLATE = """
             .grid {
                 grid-template-columns: 1fr;
             }
+
+            .scenario-grid {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
@@ -280,10 +315,16 @@ DASHBOARD_TEMPLATE = """
                 Send the same payment twice to see the first request create the payment
                 and the second request return the saved answer right away.
             </p>
+            <p>
+                Saved payment keys stay in memory for <strong>{{ ttl_label }}</strong>.
+                For quick testing, you can start the app with <code>IDEMPOTENCY_TTL_SECONDS=60</code>
+                to make keys expire after 1 minute.
+            </p>
             <div class="pill-row">
                 <span class="pill">Green means the payment was processed.</span>
                 <span class="pill">Blue means the payment was already done before.</span>
                 <span class="pill">Red means the request was blocked.</span>
+                <span class="pill">Gold means a saved key can expire and reset itself.</span>
             </div>
         </section>
 
@@ -324,6 +365,31 @@ DASHBOARD_TEMPLATE = """
                     <div><strong>Simple test:</strong> send once, send again, then change the amount while using the same key.</div>
                     <div><code>DELETE /admin/idempotency-keys/&lt;key&gt;</code> removes a saved key so you can test again from the start.</div>
                 </div>
+            </div>
+        </section>
+
+        <section class="panel stack">
+            <div>
+                <h2>What Each Scenario Means</h2>
+                <p>These are the main cases your gateway handles.</p>
+            </div>
+            <div class="scenario-grid">
+                <article class="scenario-card success">
+                    <h3>1. New payment</h3>
+                    <p>The key is new, so the gateway waits 2 seconds, processes the payment, and returns a green success result.</p>
+                </article>
+                <article class="scenario-card cache">
+                    <h3>2. Same payment sent again</h3>
+                    <p>The key and body match a saved payment, so the gateway skips the 2-second delay and returns the saved answer.</p>
+                </article>
+                <article class="scenario-card conflict">
+                    <h3>3. Same key, different details</h3>
+                    <p>If the key is reused with a different amount or body, the gateway blocks it and returns a conflict response.</p>
+                </article>
+                <article class="scenario-card neutral">
+                    <h3>4. Key expires by itself</h3>
+                    <p>After <strong>{{ ttl_label }}</strong>, the saved key is removed automatically. If you set the TTL to 60 seconds for testing, you can watch it reset after 1 minute.</p>
+                </article>
             </div>
         </section>
 
@@ -466,7 +532,7 @@ def validate_payment_payload(payload: Any):
 
 
 def new_expiry_time() -> datetime:
-    return datetime.now(timezone.utc) + timedelta(hours=IDEMPOTENCY_TTL_HOURS)
+    return datetime.now(timezone.utc) + timedelta(seconds=IDEMPOTENCY_TTL_SECONDS)
 
 
 def clear_expired_keys():
@@ -485,7 +551,8 @@ def clear_expired_keys():
 
 @app.get("/")
 def dashboard():
-    return render_template_string(DASHBOARD_TEMPLATE)
+    ttl_label = "24 hours" if IDEMPOTENCY_TTL_SECONDS == DEFAULT_TTL_SECONDS else f"{IDEMPOTENCY_TTL_SECONDS} seconds"
+    return render_template_string(DASHBOARD_TEMPLATE, ttl_label=ttl_label)
 
 
 @app.post("/process-payment")
