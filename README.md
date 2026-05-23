@@ -1,130 +1,141 @@
-# Idempotency-Gateway: The "Pay-Once" Protocol
+# FinSafe Idempotency Gateway
 
-This project is a Flask-based payment simulation service that guarantees a payment request is processed once per `Idempotency-Key`, even if the client retries because of timeouts or flaky networks.
+## 1. Project Title & Overview
 
-It is designed to protect a payment processor from accidental double charging by caching the first successful result and replaying it safely for duplicates.
+FinSafe Transactions Ltd. needs a safety layer in front of payment processing so merchants can retry a slow or timed-out payment request without charging the customer twice.
 
-## System Flow
+This Flask project solves that problem on a local machine with a thread-safe idempotency gateway:
+
+- the first request for a key is processed once
+- safe retries return a clear duplicate message without charging again
+- if someone uses the same key with different payment details, the request is blocked
+- if two matching requests arrive at almost the same time, the second one waits for the first one to finish
+- saved idempotency keys expire automatically after 24 hours so memory does not keep growing forever
+
+The project also includes a built-in browser dashboard, so you can test the API in a web page as well as in Postman or curl.
+
+## 2. Architecture Diagram
 
 ```mermaid
 sequenceDiagram
     participant Client
+    participant UI as Local Dashboard / Postman
     participant API as Flask API
-    participant Store as In-Memory Store
-    participant Processor as Payment Logic
+    participant Store as Thread-Safe Idempotency Store
+    participant Processor as Payment Simulation
 
-    rect rgb(240, 248, 255)
+    rect rgb(236, 250, 242)
         Note over Client,Processor: Happy Path
-        Client->>API: POST /process-payment<br/>Idempotency-Key: pay-001<br/>{amount: 100, currency: "GHS"}
+        Client->>UI: Submit payment
+        UI->>API: POST /process-payment + Idempotency-Key
         API->>Store: lock + lookup key
         Store-->>API: key not found
-        API->>Store: create processing record
-        API->>Processor: simulate charge (2 seconds)
-        Processor-->>API: "Charged 100 GHS"
+        API->>Store: save status=processing
+        API->>Processor: sleep 2 seconds
+        Processor-->>API: payment completed
         API->>Store: save completed response
-        API-->>Client: 201 Created<br/>X-Cache-Hit: false
+        API-->>UI: 201 + New Transaction Success
+        UI-->>Client: Green success banner
     end
 
-    rect rgb(245, 255, 245)
-        Note over Client,Processor: Duplicate Path
-        Client->>API: POST same key + same body
+    rect rgb(235, 244, 255)
+        Note over Client,Processor: Replay Cache Hit
+        Client->>UI: Retry exact same request
+        UI->>API: POST /process-payment + same key/body
         API->>Store: lock + lookup key
-        Store-->>API: completed cached record
-        API-->>Client: 200 OK<br/>same response body<br/>X-Cache-Hit: true
+        Store-->>API: completed match found
+        API-->>UI: 200 + Duplicate Detected - Already Paid
+        UI-->>Client: Blue cached-response banner
     end
 
-    rect rgb(255, 250, 240)
-        Note over Client,Processor: In-Flight Block Path
-        Client->>API: POST same key + same body while first request is sleeping
-        API->>Store: lock + lookup key
-        Store-->>API: record is processing
-        API->>API: wait on thread event
-        Processor-->>API: first request completes
-        API->>Store: event is released
-        API-->>Client: 200 OK<br/>same cached response<br/>X-Cache-Hit: true
-    end
-
-    rect rgb(255, 245, 245)
-        Note over Client,Processor: Fraud Path
-        Client->>API: POST same key + different body
-        API->>Store: lock + compare body hash
+    rect rgb(255, 239, 239)
+        Note over Client,Processor: Mismatch Fraud Blocker
+        Client->>UI: Reuse same key with different amount/body
+        UI->>API: POST /process-payment + same key/new body
+        API->>Store: compare stored payload hash
         Store-->>API: hash mismatch
-        API-->>Client: 409 Conflict<br/>"Idempotency key already used for a different request body."
+        API-->>UI: 409 + Security Alert - Conflict
+        UI-->>Client: Red conflict banner
+    end
+
+    rect rgb(255, 248, 235)
+        Note over Client,Processor: In-Flight Race Blocking
+        Client->>UI: Send request A
+        UI->>API: POST /process-payment
+        API->>Store: create processing record
+        API->>Processor: sleep 2 seconds
+        Client->>UI: Send request B immediately
+        UI->>API: POST /process-payment with same key/body
+        API->>Store: see status=processing
+        API->>API: wait on condition
+        Processor-->>API: request A completes
+        API->>Store: notify waiting request
+        API-->>UI: 200 + Duplicate Detected - Already Paid
+        UI-->>Client: Blue cached-response banner
     end
 ```
 
-## Features
+## 3. Setup & Installation Instructions
 
-- `POST /process-payment` enforces idempotent payment processing.
-- Requires an `Idempotency-Key` request header.
-- Uses a thread-safe in-memory dictionary protected by `threading.Lock()`.
-- Simulates payment execution with a 2-second delay for the first request only.
-- Returns cached responses immediately for exact duplicates.
-- Blocks and safely replays the result for in-flight duplicate requests.
-- Rejects same-key requests with different bodies using `409 Conflict`.
-- Provides an admin endpoint to manually evict cached idempotency keys.
+### Prerequisites
 
-## Tech Stack
+- Python 3.10+
+- `pip`
 
-- Python 3
-- Flask
-- Standard library concurrency primitives: `threading.Lock()` and `threading.Event()`
-
-## Project Files
-
-- [app.py](./app.py): Flask application and idempotency logic
-- [requirements.txt](./requirements.txt): Python dependencies
-- [README.md](./README.md): Documentation
-
-## Local Installation
-
-### 1. Create and activate a virtual environment
+### Install locally
 
 Windows PowerShell:
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
 
-macOS/Linux:
+macOS / Linux:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-```
-
-### 2. Install dependencies
-
-```bash
 pip install -r requirements.txt
 ```
 
-### 3. Start the server
+### Start the application
 
 ```bash
 python app.py
 ```
 
-The API runs on:
+The app will be available at:
 
 ```text
 http://localhost:5000
 ```
 
-## API Documentation
+### Run the unit tests
 
-### `POST /process-payment`
-
-Processes a payment exactly once for each unique `Idempotency-Key`.
-
-#### Required Header
-
-```http
-Idempotency-Key: <unique-string>
+```bash
+python -m unittest test_app.py
 ```
 
-#### Example Request Body
+## 4. API Documentation
+
+### Endpoints
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/` | Serves the local dashboard |
+| `POST` | `/process-payment` | Processes a payment exactly once per idempotency key |
+| `DELETE` | `/admin/idempotency-keys/<key>` | Manually evicts a completed key from memory |
+
+### Required Headers For `POST /process-payment`
+
+| Header | Required | Description |
+| --- | --- | --- |
+| `Content-Type: application/json` | Yes | Declares a JSON request body |
+| `Idempotency-Key` | Yes | Unique transaction replay key |
+
+### Sample Request Body
 
 ```json
 {
@@ -133,9 +144,11 @@ Idempotency-Key: <unique-string>
 }
 ```
 
-#### First Request Response
+### Response Examples
 
-Status:
+#### Happy Path
+
+HTTP:
 
 ```http
 201 Created
@@ -146,13 +159,14 @@ Body:
 
 ```json
 {
+  "status": "New Transaction Success",
   "message": "Charged 100 GHS"
 }
 ```
 
-#### Duplicate Request With Same Key And Same Body
+#### Replay Cache Hit
 
-Status:
+HTTP:
 
 ```http
 200 OK
@@ -163,13 +177,14 @@ Body:
 
 ```json
 {
+  "status": "Duplicate Detected - Already Paid",
   "message": "Charged 100 GHS"
 }
 ```
 
-#### Same Key With Different Body
+#### Mismatch Fraud Blocker
 
-Status:
+HTTP:
 
 ```http
 409 Conflict
@@ -179,41 +194,39 @@ Body:
 
 ```json
 {
-  "error": "Idempotency key already used for a different request body."
+  "status": "Security Alert - Conflict",
+  "message": "Idempotency key already used for a different request body."
 }
 ```
 
-### `DELETE /admin/idempotency-keys/<key>`
+#### Admin Cache Eviction Success
 
-Manually removes a completed idempotency key from memory.
+HTTP:
 
-Successful response:
+```http
+200 OK
+```
+
+Body:
 
 ```json
 {
-  "message": "Idempotency key 'pay-001' deleted."
+  "status": "Admin Success",
+  "message": "Key manually evicted from cache."
 }
 ```
 
-If the key does not exist:
+### Cache lifetime
 
-```json
-{
-  "error": "Idempotency key not found."
-}
-```
+Completed idempotency keys are kept for 24 hours.
 
-If the key is still being processed:
+- if the same key and same body come back during that time, the saved result is replayed
+- once the 24-hour window passes, the key is removed automatically
+- after that, the same request is treated like a brand-new payment again
 
-```json
-{
-  "error": "Cannot evict a key that is currently processing."
-}
-```
+### Manual Testing With curl
 
-## curl Commands
-
-### 1. Happy Path
+#### New transaction
 
 ```bash
 curl -X POST http://localhost:5000/process-payment \
@@ -222,9 +235,9 @@ curl -X POST http://localhost:5000/process-payment \
   -d "{\"amount\":100,\"currency\":\"GHS\"}"
 ```
 
-### 2. Duplicate Request
+#### Duplicate replay
 
-Run the exact same command again:
+Run the same request again:
 
 ```bash
 curl -X POST http://localhost:5000/process-payment \
@@ -233,13 +246,7 @@ curl -X POST http://localhost:5000/process-payment \
   -d "{\"amount\":100,\"currency\":\"GHS\"}"
 ```
 
-Expected result:
-
-- no 2-second delay
-- `200 OK`
-- `X-Cache-Hit: true`
-
-### 3. Fraud Check
+#### Conflict test
 
 ```bash
 curl -X POST http://localhost:5000/process-payment \
@@ -248,102 +255,78 @@ curl -X POST http://localhost:5000/process-payment \
   -d "{\"amount\":500,\"currency\":\"GHS\"}"
 ```
 
-Expected result:
-
-- `409 Conflict`
-- error message stating the key was used for a different body
-
-### 4. In-Flight Race Condition
-
-Open two terminals and run these commands almost at the same time.
-
-Terminal 1:
-
-```bash
-curl -X POST http://localhost:5000/process-payment \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: pay-race-001" \
-  -d "{\"amount\":250,\"currency\":\"USD\"}"
-```
-
-Terminal 2, immediately after Terminal 1:
-
-```bash
-curl -X POST http://localhost:5000/process-payment \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: pay-race-001" \
-  -d "{\"amount\":250,\"currency\":\"USD\"}"
-```
-
-Expected result:
-
-- Terminal 1 waits about 2 seconds and returns `201 Created`
-- Terminal 2 does not start a new charge
-- Terminal 2 waits for Terminal 1 to finish
-- Terminal 2 returns the cached result with `200 OK` and `X-Cache-Hit: true`
-
-### 5. Admin Eviction
+#### Admin eviction
 
 ```bash
 curl -X DELETE http://localhost:5000/admin/idempotency-keys/pay-001
 ```
 
-## Design Decisions
+## 5. Design Decisions
 
-### 1. In-Memory Dictionary With `threading.Lock()`
+### Thread-safe dictionary
 
-The assignment explicitly requested a local, thread-safe store. A shared Python dictionary guarded by a global `threading.Lock()` keeps the design simple, deterministic, and fully compliant with the brief.
+The brief asked for a local in-memory solution. A shared Python dictionary protected by a `threading.Lock()` keeps access safe and predictable inside one Flask app process.
 
-### 2. Canonical Body Hashing
+### Payload hashing
 
-Request bodies are converted into a stable JSON string with sorted keys and hashed using SHA-256. This prevents false mismatches caused by object key ordering and gives a reliable way to decide whether two requests are truly the same.
+The request body is cleaned into a stable JSON format and hashed with SHA-256 before comparison. This stops false mismatches caused by different key order in JSON and makes duplicate checks reliable.
 
-### 3. Safe In-Flight Coordination
+### Separate HTTP codes and descriptive status strings
 
-When the first request starts processing, it creates a record with status `processing` and a `threading.Event()`. Any duplicate request with the same key and same body waits on that event. Once the first request finishes, the event is released and waiting callers receive the cached result instead of triggering a second charge.
+The API uses strict HTTP status codes for machine-readable behavior:
 
-### 4. Response Semantics
+- `201` for a brand-new processed transaction
+- `200` for a replayed duplicate
+- `409` for a conflict caused by key reuse with a different payload
 
-- First successful request returns `201 Created` with `X-Cache-Hit: false`
-- Cached duplicates return `200 OK` with `X-Cache-Hit: true`
-- Conflicting duplicates return `409 Conflict`
+At the same time, every JSON response includes a clear `status` string written in plain English so the result is easy to understand in the dashboard, Postman, or during a demo.
 
-This makes it easy for clients and reviewers to see whether a response came from fresh processing or replay.
+### Graceful in-flight blocking
 
-## Developer's Choice Feature
+When a second identical request arrives during the 2-second processing window, it waits on a `threading.Condition()` until the first request finishes. This prevents duplicate work and avoids a race-condition bug.
 
-### Administrative Key Eviction
+### 24-hour cache expiration
 
-I added:
+Each stored key gets an `expires_at` timestamp set to 24 hours from the moment it is created or completed. Before the gateway handles a new payment or an admin delete request, it removes any expired keys from memory. This keeps the local store small and stops old entries from living forever.
+
+### Built-in dashboard
+
+The root route serves a local HTML dashboard so the project can be shown and tested without building a separate frontend. It uses `fetch()` to call the same API routes used by Postman.
+
+## 6. The Developer's Choice
+
+This project now includes two extra safety features beyond the main idempotency flow.
+
+### Feature 1: Support Admin Reset Button
+
+The first extra feature is:
 
 ```http
 DELETE /admin/idempotency-keys/<key>
 ```
 
-This gives support or operations staff a direct way to remove a completed idempotency key from memory when they need to clear stale entries manually.
+It was added because real payment systems need more than correct payment logic. They also need support tools.
 
-Why this is useful in a real fintech environment:
+### Why this helps in practice
 
-- support teams sometimes need operational tools without restarting the service
-- stale cached keys can be cleared intentionally after investigation
-- it provides a simple manual recovery path during demos, testing, or incident handling
+- operations teams may need to clear old saved records during testing or issue handling
+- support staff may need a safe manual reset path without restarting the service
+- QA teams can repeat the same payment flow quickly after removing a completed key
 
-Safety note:
+### Safety guard
 
-- the endpoint refuses to evict keys that are still `processing`
-- this preserves exactly-once behavior and avoids introducing a second charge while a live request is still in flight
+The endpoint refuses to remove a key that is still marked as `processing`. This stops someone from deleting a live transaction record and accidentally making a second charge possible.
 
-## Example Success Criteria Mapping
+### Feature 2: 24-Hour Automated Cache Lifespan
 
-- User Story 1: supported by `POST /process-payment` with a 2-second processing delay and `201 Created`
-- User Story 2: supported by cached replay with `200 OK` and `X-Cache-Hit: true`
-- User Story 3: supported by SHA-256 body comparison and `409 Conflict`
-- Bonus Story: supported by blocking duplicate callers on a shared thread event until the first request completes
+The second extra feature is automatic cache expiration.
 
-## How To Submit
+Every saved idempotency key gets a 24-hour time-to-live window. When that time passes, the gateway removes the key from memory the next time cleanup runs.
 
-1. Push this repository to your public GitHub fork.
-2. Confirm the README is the only documentation file reviewers need.
-3. Verify the server starts with `python app.py`.
-4. Test the endpoints using the curl commands above.
-5. Submit the GitHub repository link.
+### Why this helps in practice
+
+- old payment keys do not stay in RAM forever
+- the local service stays easier to manage over time
+- the replay window is clear and predictable
+- once a key expires, the same payment can be handled as a fresh transaction again
+```
